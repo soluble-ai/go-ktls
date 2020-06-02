@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -39,9 +40,11 @@ type TLSSecret struct {
 	// Or set KeyEnvVar and CertEnvVar to the environment variables
 	KeyEnvVar  string
 	CertEnvVar string
-	// Or provide a KubeClient to lookup a TLS secret and possibly generate
-	// a certificate on-the-fly
-	KubeClient kubernetes.Interface
+	// Explicitly provide a KubeClient to lookup a TLS secret and possibly generate
+	// a certificate on-the-fly.  Even if you don't provide one TLSSecret will try
+	// and get a "default" one for you.
+	ExplicitKubeClient       kubernetes.Interface
+	DisableDefaultKubeClient bool
 	// The namespace for the generated certificate
 	Namespace string
 	// The name of the secret
@@ -51,10 +54,12 @@ type TLSSecret struct {
 	// The Subject name of the generated certificates
 	SubjectOrganization string
 	// Custom log output
-	Log func(string, ...interface{})
+	Log             func(string, ...interface{})
+	kubeClient      kubernetes.Interface
+	kubeClientError error
 }
 
-func (t *TLSSecret) log(format string, values ...interface{}) {
+func (t *TLSSecret) logf(format string, values ...interface{}) {
 	if t.Log != nil {
 		t.Log(format, values...)
 	} else {
@@ -79,11 +84,29 @@ func (t *TLSSecret) GetTLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
+func (t *TLSSecret) GetKubeClient() kubernetes.Interface {
+	if t.ExplicitKubeClient != nil {
+		return t.ExplicitKubeClient
+	}
+	if !t.DisableDefaultKubeClient && t.kubeClient == nil && t.kubeClientError == nil {
+		rules := clientcmd.NewDefaultClientConfigLoadingRules()
+		config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+		if err == nil {
+			t.kubeClient, err = kubernetes.NewForConfig(config)
+		}
+		if err != nil {
+			t.logf("Failed to get a kubernetes client: %s", err.Error())
+			t.kubeClientError = err
+		}
+	}
+	return t.kubeClient
+}
+
 func (t *TLSSecret) getSecret(name string) (*corev1.Secret, error) {
-	if t.KubeClient == nil {
+	if t.GetKubeClient() == nil {
 		return nil, nil
 	}
-	secret, err := t.KubeClient.CoreV1().Secrets(t.GetNamespace()).Get(context.TODO(), name, metav1.GetOptions{})
+	secret, err := t.GetKubeClient().CoreV1().Secrets(t.GetNamespace()).Get(context.TODO(), name, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -107,9 +130,9 @@ func (t *TLSSecret) GetCertificate() (*CertificateKeyPair, error) {
 	}
 	if ckp == nil {
 		if t.Name == "" {
-			return nil, fmt.Errorf("Name must be set for TLSSecret")
+			return nil, fmt.Errorf("name must be set for TLSSecret")
 		}
-		if t.KubeClient == nil {
+		if t.GetKubeClient() == nil {
 			return nil, fmt.Errorf("cannot create secret if kubernetes client is not set")
 		}
 		var err error
@@ -137,13 +160,13 @@ func (t *TLSSecret) getMountedCertifcate() *CertificateKeyPair {
 				CertPem: cert,
 			}
 			if ckp.IsValid() {
-				t.log("using tls secret from %s", t.MountPoint)
+				t.logf("using tls secret from %s", t.MountPoint)
 				return ckp
 			}
 		}
 	}
 	if !os.IsNotExist(err) {
-		t.log("failed to read tls secret from %s: %s", t.MountPoint, err.Error())
+		t.logf("failed to read tls secret from %s: %s", t.MountPoint, err.Error())
 	}
 	return nil
 }
@@ -158,7 +181,7 @@ func (t *TLSSecret) getEnvironmentCertificate() *CertificateKeyPair {
 				CertPem: []byte(cert),
 			}
 			if ckp.IsValid() {
-				t.log("using tls secret from %s %s", t.CertEnvVar, t.KeyEnvVar)
+				t.logf("using tls secret from %s %s", t.CertEnvVar, t.KeyEnvVar)
 				return ckp
 			}
 		}
@@ -177,7 +200,7 @@ func (t *TLSSecret) getSecretCertificate(name string) (*CertificateKeyPair, erro
 			CertPem: getSecretData(secret, corev1.TLSCertKey),
 		}
 		if ckp.IsValid() {
-			t.log("Using TLS secret from %s/%s", t.GetNamespace(), t.Name)
+			t.logf("Using TLS secret from %s/%s", t.GetNamespace(), t.Name)
 			return ckp, nil
 		}
 	}
@@ -199,14 +222,14 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	caCert, err = t.getSecretCertificate(caName)
 	if err == nil {
 		if caCert == nil {
-			t.log("Generating new CA certificate %s/%s", t.GetNamespace(), caName)
+			t.logf("Generating new CA certificate %s/%s", t.GetNamespace(), caName)
 			caCert, err = GenerateCert(org, nil)
 			if err == nil {
 				err = t.persistCert(caCert, caName)
 			}
 		}
 		if err == nil {
-			t.log("Generating new TLS certificate %s/%s", t.GetNamespace(), t.Name)
+			t.logf("Generating new TLS certificate %s/%s", t.GetNamespace(), t.Name)
 			cert, err = GenerateCert(org, caCert)
 			if err == nil {
 				err = t.persistCert(cert, t.Name)
@@ -237,18 +260,18 @@ func (t *TLSSecret) persistCert(ckp *CertificateKeyPair, name string) error {
 				Type: corev1.SecretTypeTLS,
 				Data: secretData,
 			}
-			_, err := t.KubeClient.CoreV1().Secrets(t.GetNamespace()).Create(context.TODO(), secret, metav1.CreateOptions{})
+			_, err := t.GetKubeClient().CoreV1().Secrets(t.GetNamespace()).Create(context.TODO(), secret, metav1.CreateOptions{})
 			return err
 		}
 		secret.Type = corev1.SecretTypeTLS
 		secret.Data = secretData
-		_, err = t.KubeClient.CoreV1().Secrets(t.GetNamespace()).Update(context.TODO(), secret, metav1.UpdateOptions{})
+		_, err = t.GetKubeClient().CoreV1().Secrets(t.GetNamespace()).Update(context.TODO(), secret, metav1.UpdateOptions{})
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	t.log("Saved secret %s/%s", t.GetNamespace(), name)
+	t.logf("Saved secret %s/%s", t.GetNamespace(), name)
 	return nil
 }
 
