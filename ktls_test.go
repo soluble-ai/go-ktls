@@ -31,9 +31,9 @@ func TestTLS(t *testing.T) {
 	defer os.RemoveAll(dir)
 	k := fake.NewSimpleClientset()
 	kt := &TLSSecret{
-		KubeClient: k,
-		Name:       "tls",
-		MountPoint: dir,
+		ExplicitKubeClient: k,
+		Name:               "tls",
+		MountPoint:         dir,
 	}
 	tlsConfig, err := kt.GetTLSConfig()
 	if err != nil {
@@ -93,10 +93,10 @@ func TestFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	if err := ioutil.WriteFile(filepath.Join(dir, "tls.key"), cert.KeyPem, 0777); err != nil {
+	if err := ioutil.WriteFile(filepath.Join(dir, "tls.key"), cert.KeyPem, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(filepath.Join(dir, "tls.crt"), cert.CertPem, 0777); err != nil {
+	if err := ioutil.WriteFile(filepath.Join(dir, "tls.crt"), cert.CertPem, 0600); err != nil {
 		t.Fatal(err)
 	}
 	kt := &TLSSecret{

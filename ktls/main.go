@@ -15,12 +15,12 @@
 package main
 
 import (
+	"crypto/x509"
 	"flag"
+	"fmt"
 
 	"github.com/soluble-ai/go-ktls"
-	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 var secret = &ktls.TLSSecret{}
@@ -30,16 +30,15 @@ func main() {
 	flag.StringVar(&secret.Name, "name", "tls", "The name of the secret")
 	flag.StringVar(&secret.Namespace, "namespace", "default", "The namespace to create the secret in")
 	flag.StringVar(&secret.SubjectOrganization, "organization", "", "The subject organization name of the generated certificates")
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	flag.StringVar(&rules.ExplicitPath, "kube-config", "", "The kubernetes config file, required for out-of-cluster")
 	flag.Parse()
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	cert, err := secret.GetCertificate()
 	if err != nil {
 		panic(err)
 	}
-	secret.KubeClient = kubernetes.NewForConfigOrDie(config)
-	_, err = secret.GetCertificate()
+	chain := cert.GetTLSCertificateChain()
+	x509Cert, err := x509.ParseCertificate(chain.Certificate[0])
 	if err != nil {
 		panic(err)
 	}
+	fmt.Printf("subject=%s notAfter=%s\n", x509Cert.Subject, x509Cert.NotAfter)
 }
