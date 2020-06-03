@@ -51,8 +51,6 @@ type TLSSecret struct {
 	Name string
 	// The name of the CA secret
 	CAName string
-	// The Subject name of the generated certificates
-	SubjectOrganization string
 	// Custom log output
 	Log             func(string, ...interface{})
 	kubeClient      kubernetes.Interface
@@ -213,24 +211,20 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	if caName == "" {
 		caName = t.Name + "-ca"
 	}
-	org := t.SubjectOrganization
-	if org == "" {
-		org = t.Name
-	}
 	var caCert *CertificateKeyPair
 	var cert *CertificateKeyPair
 	caCert, err = t.getSecretCertificate(caName)
 	if err == nil {
 		if caCert == nil {
 			t.logf("Generating new CA certificate %s/%s", t.GetNamespace(), caName)
-			caCert, err = GenerateCert(org, nil)
+			caCert, err = GenerateCert(caName, nil)
 			if err == nil {
 				err = t.persistCert(caCert, caName)
 			}
 		}
 		if err == nil {
 			t.logf("Generating new TLS certificate %s/%s", t.GetNamespace(), t.Name)
-			cert, err = GenerateCert(org, caCert)
+			cert, err = GenerateCert(t.Name, caCert)
 			if err == nil {
 				err = t.persistCert(cert, t.Name)
 			}
