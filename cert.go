@@ -72,7 +72,7 @@ func (ckp *CertificateKeyPair) IsValid() bool {
 	return true
 }
 
-func GenerateCert(subjectOrganization string, parent *CertificateKeyPair) (*CertificateKeyPair, error) {
+func GenerateCert(name string, parent *CertificateKeyPair) (*CertificateKeyPair, error) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
@@ -88,11 +88,10 @@ func GenerateCert(subjectOrganization string, parent *CertificateKeyPair) (*Cert
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization: []string{subjectOrganization},
+			CommonName: name,
 		},
-		NotBefore: notBefore,
-		NotAfter:  notAfter,
-
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,

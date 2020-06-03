@@ -29,7 +29,6 @@ func main() {
 	flag.StringVar(&secret.CAName, "ca-name", "", "The name of the CA secret")
 	flag.StringVar(&secret.Name, "name", "tls", "The name of the secret")
 	flag.StringVar(&secret.Namespace, "namespace", "default", "The namespace to create the secret in")
-	flag.StringVar(&secret.SubjectOrganization, "organization", "", "The subject organization name of the generated certificates")
 	flag.Parse()
 	cert, err := secret.GetCertificate()
 	if err != nil {
