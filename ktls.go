@@ -37,9 +37,6 @@ import (
 type TLSSecret struct {
 	// Set this to where the TLS secret is mounted
 	MountPoint string
-	// Or set KeyEnvVar and CertEnvVar to the environment variables
-	KeyEnvVar  string
-	CertEnvVar string
 	// Explicitly provide a KubeClient to lookup a TLS secret and possibly generate
 	// a certificate on-the-fly.  Even if you don't provide one TLSSecret will try
 	// and get a "default" one for you.
@@ -50,7 +47,8 @@ type TLSSecret struct {
 	// The name of the secret
 	Name string
 	// The name of the CA secret
-	CAName string
+	CAName   string
+	DNSNames []string
 	// Custom log output
 	Log             func(string, ...interface{})
 	kubeClient      kubernetes.Interface
@@ -82,6 +80,14 @@ func (t *TLSSecret) GetTLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
+func (t *TLSSecret) MustGetTLSConfig() *tls.Config {
+	config, err := t.GetTLSConfig()
+	if err != nil {
+		panic(err)
+	}
+	return config
+}
+
 func (t *TLSSecret) GetKubeClient() kubernetes.Interface {
 	if t.ExplicitKubeClient != nil {
 		return t.ExplicitKubeClient
@@ -101,7 +107,7 @@ func (t *TLSSecret) GetKubeClient() kubernetes.Interface {
 }
 
 func (t *TLSSecret) getSecret(name string) (*corev1.Secret, error) {
-	if t.GetKubeClient() == nil {
+	if t.GetKubeClient() == nil || name == "" {
 		return nil, nil
 	}
 	secret, err := t.GetKubeClient().CoreV1().Secrets(t.GetNamespace()).Get(context.TODO(), name, metav1.GetOptions{})
@@ -116,9 +122,6 @@ func (t *TLSSecret) getSecret(name string) (*corev1.Secret, error) {
 
 func (t *TLSSecret) GetCertificate() (*CertificateKeyPair, error) {
 	ckp := t.getMountedCertifcate()
-	if ckp == nil {
-		ckp = t.getEnvironmentCertificate()
-	}
 	if ckp == nil {
 		var err error
 		ckp, err = t.getSecretCertificate(t.Name)
@@ -169,24 +172,6 @@ func (t *TLSSecret) getMountedCertifcate() *CertificateKeyPair {
 	return nil
 }
 
-func (t *TLSSecret) getEnvironmentCertificate() *CertificateKeyPair {
-	if t.KeyEnvVar != "" && t.CertEnvVar != "" {
-		key := os.Getenv(t.KeyEnvVar)
-		cert := os.Getenv(t.CertEnvVar)
-		if key != "" && cert != "" {
-			ckp := &CertificateKeyPair{
-				KeyPem:  []byte(key),
-				CertPem: []byte(cert),
-			}
-			if ckp.IsValid() {
-				t.logf("using tls secret from %s %s", t.CertEnvVar, t.KeyEnvVar)
-				return ckp
-			}
-		}
-	}
-	return nil
-}
-
 func (t *TLSSecret) getSecretCertificate(name string) (*CertificateKeyPair, error) {
 	secret, err := t.getSecret(name)
 	if err != nil {
@@ -217,14 +202,14 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	if err == nil {
 		if caCert == nil {
 			t.logf("Generating new CA certificate %s/%s", t.GetNamespace(), caName)
-			caCert, err = GenerateCert(caName, nil)
+			caCert, err = GenerateCert(caName, nil, nil)
 			if err == nil {
 				err = t.persistCert(caCert, caName)
 			}
 		}
 		if err == nil {
 			t.logf("Generating new TLS certificate %s/%s", t.GetNamespace(), t.Name)
-			cert, err = GenerateCert(t.Name, caCert)
+			cert, err = GenerateCert(t.Name, t.DNSNames, caCert)
 			if err == nil {
 				err = t.persistCert(cert, t.Name)
 			}

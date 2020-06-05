@@ -17,7 +17,7 @@ package ktls
 import "testing"
 
 func TestGenerateCerts(t *testing.T) {
-	cackp, err := GenerateCert("Test Inc", nil)
+	cackp, err := GenerateCert("Test Inc", nil, nil)
 	if err != nil {
 		t.Error(err)
 	}
@@ -31,7 +31,7 @@ func TestGenerateCerts(t *testing.T) {
 	if !cacert.IsCA {
 		t.Error("cert is not a CA cert")
 	}
-	ckp, err := GenerateCert("Test Inc", cackp)
+	ckp, err := GenerateCert("Test Inc", nil, cackp)
 	if err != nil {
 		t.Error(err)
 	}

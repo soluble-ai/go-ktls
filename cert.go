@@ -72,7 +72,7 @@ func (ckp *CertificateKeyPair) IsValid() bool {
 	return true
 }
 
-func GenerateCert(name string, parent *CertificateKeyPair) (*CertificateKeyPair, error) {
+func GenerateCert(name string, dnsNames []string, parent *CertificateKeyPair) (*CertificateKeyPair, error) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
@@ -95,6 +95,7 @@ func GenerateCert(name string, parent *CertificateKeyPair) (*CertificateKeyPair,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
+		DNSNames:              dnsNames,
 	}
 	var parentCert *x509.Certificate
 	var signingKey interface{}
@@ -119,7 +120,6 @@ func GenerateCert(name string, parent *CertificateKeyPair) (*CertificateKeyPair,
 		return nil, fmt.Errorf("failed to encode cert: %w", err)
 	}
 	if parent != nil {
-		certPem.WriteString("\n")
 		certPem.Write(parent.CertPem)
 	}
 

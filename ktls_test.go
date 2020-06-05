@@ -42,6 +42,9 @@ func TestTLS(t *testing.T) {
 	if tlsConfig == nil {
 		t.Error()
 	}
+	if n := len(tlsConfig.Certificates[0].Certificate); n != 2 {
+		t.Error(n)
+	}
 	if s, err := kt.getSecret("tls"); s == nil || err != nil {
 		t.Error("did not generate certificate secrets", s, err)
 	}
@@ -58,32 +61,15 @@ func TestTLS(t *testing.T) {
 }
 
 func createCert(t *testing.T) *CertificateKeyPair {
-	caCert, err := GenerateCert("Test Inc", nil)
+	caCert, err := GenerateCert("Test Inc", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := GenerateCert("Test Inc", caCert)
+	cert, err := GenerateCert("Test Inc", nil, caCert)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return cert
-}
-
-func TestEnv(t *testing.T) {
-	cert := createCert(t)
-	os.Setenv("TLS_CERT", string(cert.CertPem))
-	os.Setenv("TLS_KEY", string(cert.KeyPem))
-	kt := &TLSSecret{
-		CertEnvVar: "TLS_CERT",
-		KeyEnvVar:  "TLS_KEY",
-	}
-	ckp, err := kt.GetCertificate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ckp.IsValid() {
-		t.Error("invalid certificate")
-	}
 }
 
 func TestFS(t *testing.T) {

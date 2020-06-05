@@ -15,29 +15,36 @@
 package main
 
 import (
-	"crypto/x509"
 	"flag"
 	"fmt"
+	"strings"
 
 	"github.com/soluble-ai/go-ktls"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
 var secret = &ktls.TLSSecret{}
+var quiet bool
+var dnsNames string
 
 func main() {
 	flag.StringVar(&secret.CAName, "ca-name", "", "The name of the CA secret")
 	flag.StringVar(&secret.Name, "name", "tls", "The name of the secret")
 	flag.StringVar(&secret.Namespace, "namespace", "default", "The namespace to create the secret in")
+	flag.StringVar(&dnsNames, "dns-names", "", "Comma separated list of DNS names for the cert")
+	flag.BoolVar(&quiet, "q", false, "Don't print anything")
 	flag.Parse()
+	if dnsNames != "" {
+		secret.DNSNames = strings.Split(dnsNames, ",")
+	}
+	if quiet {
+		secret.Log = func(format string, values ...interface{}) {}
+	}
 	cert, err := secret.GetCertificate()
 	if err != nil {
 		panic(err)
 	}
-	chain := cert.GetTLSCertificateChain()
-	x509Cert, err := x509.ParseCertificate(chain.Certificate[0])
-	if err != nil {
-		panic(err)
+	if !quiet {
+		fmt.Println(string(cert.CertPem))
 	}
-	fmt.Printf("subject=%s notAfter=%s\n", x509Cert.Subject, x509Cert.NotAfter)
 }
