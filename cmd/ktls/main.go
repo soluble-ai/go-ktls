@@ -16,7 +16,9 @@ package main
 
 import (
 	"flag"
-	"fmt"
+	"io/ioutil"
+	"log"
+	"path/filepath"
 	"strings"
 
 	"github.com/soluble-ai/go-ktls"
@@ -26,6 +28,7 @@ import (
 var secret = &ktls.TLSSecret{}
 var quiet bool
 var dnsNames string
+var outputDir string
 
 func main() {
 	flag.StringVar(&secret.CAName, "ca-name", "", "The name of the CA secret")
@@ -33,6 +36,7 @@ func main() {
 	flag.StringVar(&secret.Namespace, "namespace", "default", "The namespace to create the secret in")
 	flag.StringVar(&dnsNames, "dns-names", "", "Comma separated list of DNS names for the cert")
 	flag.BoolVar(&quiet, "q", false, "Don't print anything")
+	flag.StringVar(&outputDir, "output-dir", "", "Write the certificate to this directory")
 	flag.Parse()
 	if dnsNames != "" {
 		secret.DNSNames = strings.Split(dnsNames, ",")
@@ -40,11 +44,18 @@ func main() {
 	if quiet {
 		secret.Log = func(format string, values ...interface{}) {}
 	}
-	cert, err := secret.GetCertificate()
+	cert, err := secret.GetCertificateKeyPair()
 	if err != nil {
 		panic(err)
 	}
-	if !quiet {
-		fmt.Println(string(cert.CertPem))
+	if outputDir != "" {
+		err := ioutil.WriteFile(filepath.Join(outputDir, secret.Name+".crt"), cert.CertPem, 0600)
+		if err == nil {
+			err = ioutil.WriteFile(filepath.Join(outputDir, secret.Name+".key"), cert.KeyPem, 0600)
+		}
+		if err != nil {
+			log.Fatalf("Could not save certificate to %s: %s", outputDir, err.Error())
+		}
+		log.Printf("Saved certificate to %s", outputDir)
 	}
 }

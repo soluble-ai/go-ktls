@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -46,8 +47,12 @@ type TLSSecret struct {
 	Namespace string
 	// The name of the secret
 	Name string
-	// The name of the CA secret
-	CAName   string
+	// The name of the CA secret, defaults to Name-ca
+	CAName string
+	// The duration of the CA certifcate, defaults to 1 year
+	CADuration time.Duration
+	// The duration of the TLS certificate, defaults to 8 hours
+	Duration time.Duration
 	DNSNames []string
 	// Custom log output
 	Log             func(string, ...interface{})
@@ -71,7 +76,7 @@ func (t *TLSSecret) GetNamespace() string {
 }
 
 func (t *TLSSecret) GetTLSConfig() (*tls.Config, error) {
-	cert, err := t.GetCertificate()
+	cert, err := t.GetCertificateKeyPair()
 	if err != nil {
 		return nil, err
 	}
@@ -120,8 +125,8 @@ func (t *TLSSecret) getSecret(name string) (*corev1.Secret, error) {
 	return secret, nil
 }
 
-func (t *TLSSecret) GetCertificate() (*CertificateKeyPair, error) {
-	ckp := t.getMountedCertifcate()
+func (t *TLSSecret) GetCertificateKeyPair() (*CertificateKeyPair, error) {
+	ckp := t.getFilesystemCertificate()
 	if ckp == nil {
 		var err error
 		ckp, err = t.getSecretCertificate(t.Name)
@@ -131,10 +136,10 @@ func (t *TLSSecret) GetCertificate() (*CertificateKeyPair, error) {
 	}
 	if ckp == nil {
 		if t.Name == "" {
-			return nil, fmt.Errorf("name must be set for TLSSecret")
+			return nil, fmt.Errorf("the TLSSecret Name must be set")
 		}
 		if t.GetKubeClient() == nil {
-			return nil, fmt.Errorf("cannot create secret if kubernetes client is not set")
+			return nil, fmt.Errorf("cannot create secret if kubernetes client is not available")
 		}
 		var err error
 		ckp, err = t.generateCert()
@@ -145,7 +150,7 @@ func (t *TLSSecret) GetCertificate() (*CertificateKeyPair, error) {
 	return ckp, nil
 }
 
-func (t *TLSSecret) getMountedCertifcate() *CertificateKeyPair {
+func (t *TLSSecret) getFilesystemCertificate() *CertificateKeyPair {
 	if t.MountPoint == "" {
 		return nil
 	}
@@ -159,6 +164,7 @@ func (t *TLSSecret) getMountedCertifcate() *CertificateKeyPair {
 			ckp := &CertificateKeyPair{
 				KeyPem:  key,
 				CertPem: cert,
+				Source:  t.MountPoint,
 			}
 			if ckp.IsValid() {
 				t.logf("using tls secret from %s", t.MountPoint)
@@ -181,6 +187,7 @@ func (t *TLSSecret) getSecretCertificate(name string) (*CertificateKeyPair, erro
 		ckp := &CertificateKeyPair{
 			KeyPem:  getSecretData(secret, corev1.TLSPrivateKeyKey),
 			CertPem: getSecretData(secret, corev1.TLSCertKey),
+			Source:  secret,
 		}
 		if ckp.IsValid() {
 			t.logf("Using TLS secret from %s/%s", t.GetNamespace(), t.Name)
@@ -202,14 +209,22 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	if err == nil {
 		if caCert == nil {
 			t.logf("Generating new CA certificate %s/%s", t.GetNamespace(), caName)
-			caCert, err = GenerateCert(caName, nil, nil)
+			caDuration := t.CADuration
+			if caDuration == 0 {
+				caDuration = 365 * 24 * time.Hour
+			}
+			caCert, err = GenerateCert(caName, nil, nil, caDuration)
 			if err == nil {
 				err = t.persistCert(caCert, caName)
 			}
 		}
 		if err == nil {
 			t.logf("Generating new TLS certificate %s/%s", t.GetNamespace(), t.Name)
-			cert, err = GenerateCert(t.Name, t.DNSNames, caCert)
+			duration := t.Duration
+			if duration == 0 {
+				duration = 8 * time.Hour
+			}
+			cert, err = GenerateCert(t.Name, t.DNSNames, caCert, duration)
 			if err == nil {
 				err = t.persistCert(cert, t.Name)
 			}
@@ -223,9 +238,17 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 
 func (t *TLSSecret) persistCert(ckp *CertificateKeyPair, name string) error {
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		secret, err := t.getSecret(name)
+		c, err := t.getSecretCertificate(name)
 		if err != nil {
 			return err
+		}
+		if c.IsValid() {
+			ckp.CopyFrom(c)
+			return nil
+		}
+		var secret *corev1.Secret
+		if c != nil {
+			secret = c.Source.(*corev1.Secret)
 		}
 		secretData := map[string][]byte{
 			corev1.TLSCertKey:       ckp.CertPem,

@@ -27,8 +27,7 @@ fi
 if "${linter}" --help > /dev/null 2>&1; then
     echo "Running ${linter}"
     "${linter}" run -E stylecheck -E gosec -E goimports -E misspell -E gocritic \
-      -E whitespace -E goprintffuncname \
-      -e G402 ; # we turn off TLS verification by option
+      -E whitespace -E goprintffuncname
 else
     echo "golangci-lint not available, skipping lint"
 fi

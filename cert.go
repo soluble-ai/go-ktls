@@ -28,13 +28,28 @@ import (
 )
 
 type CertificateKeyPair struct {
-	KeyPem  []byte
-	CertPem []byte
+	CertPem          []byte
+	KeyPem           []byte
+	Source           interface{}
+	parsedCertifcate *x509.Certificate
 }
 
-func (ckp *CertificateKeyPair) getX509Certificate() (*x509.Certificate, error) {
-	block, _ := pem.Decode(ckp.CertPem)
-	return x509.ParseCertificate(block.Bytes)
+func (ckp *CertificateKeyPair) CopyFrom(c *CertificateKeyPair) {
+	ckp.CertPem = c.CertPem
+	ckp.KeyPem = c.KeyPem
+	ckp.parsedCertifcate = c.parsedCertifcate
+}
+
+func (ckp *CertificateKeyPair) GetParsedCertificate() (*x509.Certificate, error) {
+	if ckp.parsedCertifcate == nil {
+		block, _ := pem.Decode(ckp.CertPem)
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		ckp.parsedCertifcate = cert
+	}
+	return ckp.parsedCertifcate, nil
 }
 
 func (ckp *CertificateKeyPair) GetTLSCertificateChain() tls.Certificate {
@@ -61,7 +76,7 @@ func (ckp *CertificateKeyPair) IsValid() bool {
 	if ckp.KeyPem == nil || ckp.CertPem == nil {
 		return false
 	}
-	cert, err := ckp.getX509Certificate()
+	cert, err := ckp.GetParsedCertificate()
 	if err != nil {
 		return false
 	}
@@ -72,13 +87,13 @@ func (ckp *CertificateKeyPair) IsValid() bool {
 	return true
 }
 
-func GenerateCert(name string, dnsNames []string, parent *CertificateKeyPair) (*CertificateKeyPair, error) {
+func GenerateCert(name string, dnsNames []string, parent *CertificateKeyPair, duration time.Duration) (*CertificateKeyPair, error) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 	notBefore := time.Now()
-	notAfter := notBefore.Add(90 * 24 * time.Hour)
+	notAfter := notBefore.Add(duration)
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
@@ -105,7 +120,7 @@ func GenerateCert(name string, dnsNames []string, parent *CertificateKeyPair) (*
 		parentCert = &template
 		signingKey = priv
 	} else {
-		parentCert, err = parent.getX509Certificate()
+		parentCert, err = parent.GetParsedCertificate()
 		if err != nil {
 			return nil, err
 		}
