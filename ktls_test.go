@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -51,7 +52,7 @@ func TestTLS(t *testing.T) {
 	if s, err := kt.getSecret("tls-ca"); s == nil || err != nil {
 		t.Error("did not generate certificate secrets", s, err)
 	}
-	ckp, err := kt.GetCertificate()
+	ckp, err := kt.GetCertificateKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,11 +62,11 @@ func TestTLS(t *testing.T) {
 }
 
 func createCert(t *testing.T) *CertificateKeyPair {
-	caCert, err := GenerateCert("Test Inc", nil, nil)
+	caCert, err := GenerateCert("Test Inc", nil, nil, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := GenerateCert("Test Inc", nil, caCert)
+	cert, err := GenerateCert("Test Inc", nil, caCert, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +89,7 @@ func TestFS(t *testing.T) {
 	kt := &TLSSecret{
 		MountPoint: dir,
 	}
-	ckp, err := kt.GetCertificate()
+	ckp, err := kt.GetCertificateKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}

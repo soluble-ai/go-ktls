@@ -14,24 +14,27 @@
 
 package ktls
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestGenerateCerts(t *testing.T) {
-	cackp, err := GenerateCert("Test Inc", nil, nil)
+	cackp, err := GenerateCert("Test Inc", nil, nil, 1*time.Hour)
 	if err != nil {
 		t.Error(err)
 	}
 	if !cackp.IsValid() {
 		t.Error("generated cert isn't valid")
 	}
-	cacert, err := cackp.getX509Certificate()
+	cacert, err := cackp.GetParsedCertificate()
 	if err != nil {
 		t.Error(err)
 	}
 	if !cacert.IsCA {
 		t.Error("cert is not a CA cert")
 	}
-	ckp, err := GenerateCert("Test Inc", nil, cackp)
+	ckp, err := GenerateCert("Test Inc", nil, cackp, 1*time.Hour)
 	if err != nil {
 		t.Error(err)
 	}
