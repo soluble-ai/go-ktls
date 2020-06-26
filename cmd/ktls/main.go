@@ -49,9 +49,9 @@ func main() {
 		panic(err)
 	}
 	if outputDir != "" {
-		err := ioutil.WriteFile(filepath.Join(outputDir, secret.Name+".crt"), cert.CertPem, 0600)
+		err := ioutil.WriteFile(filepath.Join(outputDir, "tls.crt"), cert.CertPem, 0600)
 		if err == nil {
-			err = ioutil.WriteFile(filepath.Join(outputDir, secret.Name+".key"), cert.KeyPem, 0600)
+			err = ioutil.WriteFile(filepath.Join(outputDir, "tls.key"), cert.KeyPem, 0600)
 		}
 		if err != nil {
 			log.Fatalf("Could not save certificate to %s: %s", outputDir, err.Error())

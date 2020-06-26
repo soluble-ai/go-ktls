@@ -18,10 +18,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"os"
-	"path/filepath"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -36,14 +34,12 @@ import (
 // resorting to generating a certificate on-the-fly and saving it in
 // a secret if necessary.
 type TLSSecret struct {
-	// Set this to where the TLS secret is mounted
-	MountPoint string
 	// Explicitly provide a KubeClient to lookup a TLS secret and possibly generate
 	// a certificate on-the-fly.  Even if you don't provide one TLSSecret will try
 	// and get a "default" one for you.
 	ExplicitKubeClient       kubernetes.Interface
 	DisableDefaultKubeClient bool
-	// The namespace for the generated certificate
+	// The namespace for the certificate
 	Namespace string
 	// The name of the secret
 	Name string
@@ -55,10 +51,16 @@ type TLSSecret struct {
 	Duration time.Duration
 	DNSNames []string
 	// Custom log output
-	Log             func(string, ...interface{})
+	Log func(string, ...interface{})
+
+	lock            sync.Mutex
+	tlsCertificate  *tls.Certificate
+	renewalTime     time.Time
 	kubeClient      kubernetes.Interface
 	kubeClientError error
 }
+
+const renewalDenomintor = 5
 
 func (t *TLSSecret) logf(format string, values ...interface{}) {
 	if t.Log != nil {
@@ -76,13 +78,30 @@ func (t *TLSSecret) GetNamespace() string {
 }
 
 func (t *TLSSecret) GetTLSConfig() (*tls.Config, error) {
-	cert, err := t.GetCertificateKeyPair()
-	if err != nil {
-		return nil, err
-	}
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert.GetTLSCertificateChain()},
+		GetCertificate: t.getTLSCertificate,
 	}, nil
+}
+
+func (t *TLSSecret) getTLSCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.tlsCertificate == nil || time.Now().After(t.renewalTime) {
+		ckp, err := t.GetCertificateKeyPair()
+		if err != nil {
+			t.logf("Could not get certificate: %s", err.Error())
+			return nil, nil
+		}
+		t.tlsCertificate = ckp.GetTLSCertificateChain()
+		x509cert, err := ckp.GetParsedCertificate()
+		if err != nil {
+			t.logf("Could not parse generated certificate: %s", err.Error())
+			t.renewalTime = time.Now().Add(time.Minute)
+		} else {
+			t.renewalTime = x509cert.NotAfter.Add(-15 * time.Minute)
+		}
+	}
+	return t.tlsCertificate, nil
 }
 
 func (t *TLSSecret) MustGetTLSConfig() *tls.Config {
@@ -126,13 +145,9 @@ func (t *TLSSecret) getSecret(name string) (*corev1.Secret, error) {
 }
 
 func (t *TLSSecret) GetCertificateKeyPair() (*CertificateKeyPair, error) {
-	ckp := t.getFilesystemCertificate()
-	if ckp == nil {
-		var err error
-		ckp, err = t.getSecretCertificate(t.Name)
-		if err != nil {
-			return nil, err
-		}
+	ckp, err := t.getSecretCertificate(t.Name, t.getCertDuration()/renewalDenomintor)
+	if err != nil {
+		return nil, err
 	}
 	if ckp == nil {
 		if t.Name == "" {
@@ -150,35 +165,7 @@ func (t *TLSSecret) GetCertificateKeyPair() (*CertificateKeyPair, error) {
 	return ckp, nil
 }
 
-func (t *TLSSecret) getFilesystemCertificate() *CertificateKeyPair {
-	if t.MountPoint == "" {
-		return nil
-	}
-	var err error
-	var key []byte
-	var cert []byte
-	key, err = ioutil.ReadFile(filepath.Join(t.MountPoint, "tls.key"))
-	if err == nil {
-		cert, err = ioutil.ReadFile(filepath.Join(t.MountPoint, "tls.crt"))
-		if err == nil {
-			ckp := &CertificateKeyPair{
-				KeyPem:  key,
-				CertPem: cert,
-				Source:  t.MountPoint,
-			}
-			if ckp.IsValid() {
-				t.logf("using tls secret from %s", t.MountPoint)
-				return ckp
-			}
-		}
-	}
-	if !os.IsNotExist(err) {
-		t.logf("failed to read tls secret from %s: %s", t.MountPoint, err.Error())
-	}
-	return nil
-}
-
-func (t *TLSSecret) getSecretCertificate(name string) (*CertificateKeyPair, error) {
+func (t *TLSSecret) getSecretCertificate(name string, d time.Duration) (*CertificateKeyPair, error) {
 	secret, err := t.getSecret(name)
 	if err != nil {
 		return nil, err
@@ -189,12 +176,28 @@ func (t *TLSSecret) getSecretCertificate(name string) (*CertificateKeyPair, erro
 			CertPem: getSecretData(secret, corev1.TLSCertKey),
 			Source:  secret,
 		}
-		if ckp.IsValid() {
+		if ckp.IsValid(d) {
 			t.logf("Using TLS secret from %s/%s", t.GetNamespace(), t.Name)
 			return ckp, nil
 		}
 	}
 	return nil, nil
+}
+
+func (t *TLSSecret) getCertDuration() time.Duration {
+	duration := t.Duration
+	if duration == 0 {
+		duration = 8 * time.Hour
+	}
+	return duration
+}
+
+func (t *TLSSecret) getCACertDuration() time.Duration {
+	caDuration := t.CADuration
+	if caDuration == 0 {
+		caDuration = 365 * 24 * time.Hour
+	}
+	return caDuration
 }
 
 func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
@@ -205,14 +208,12 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	}
 	var caCert *CertificateKeyPair
 	var cert *CertificateKeyPair
-	caCert, err = t.getSecretCertificate(caName)
+	caCert, err = t.getSecretCertificate(caName, t.getCACertDuration()/renewalDenomintor)
+	caDuration := t.getCACertDuration()
+	certDuration := t.getCertDuration()
 	if err == nil {
-		if caCert == nil {
+		if caCert == nil || caCert.IsValid(caDuration/renewalDenomintor) {
 			t.logf("Generating new CA certificate %s/%s", t.GetNamespace(), caName)
-			caDuration := t.CADuration
-			if caDuration == 0 {
-				caDuration = 365 * 24 * time.Hour
-			}
 			caCert, err = GenerateCert(caName, nil, nil, caDuration)
 			if err == nil {
 				err = t.persistCert(caCert, caName)
@@ -220,11 +221,7 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 		}
 		if err == nil {
 			t.logf("Generating new TLS certificate %s/%s", t.GetNamespace(), t.Name)
-			duration := t.Duration
-			if duration == 0 {
-				duration = 8 * time.Hour
-			}
-			cert, err = GenerateCert(t.Name, t.DNSNames, caCert, duration)
+			cert, err = GenerateCert(t.Name, t.DNSNames, caCert, certDuration)
 			if err == nil {
 				err = t.persistCert(cert, t.Name)
 			}
@@ -238,11 +235,12 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 
 func (t *TLSSecret) persistCert(ckp *CertificateKeyPair, name string) error {
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		c, err := t.getSecretCertificate(name)
+		c, err := t.getSecretCertificate(name, time.Minute)
 		if err != nil {
 			return err
 		}
-		if c.IsValid() {
+		if c.IsValid(time.Minute) {
+			t.logf("Updated certificate is now valid")
 			ckp.CopyFrom(c)
 			return nil
 		}
@@ -268,12 +266,14 @@ func (t *TLSSecret) persistCert(ckp *CertificateKeyPair, name string) error {
 		secret.Type = corev1.SecretTypeTLS
 		secret.Data = secretData
 		_, err = t.GetKubeClient().CoreV1().Secrets(t.GetNamespace()).Update(context.TODO(), secret, metav1.UpdateOptions{})
+		if err == nil {
+			t.logf("Saved secret %s/%s", t.GetNamespace(), name)
+		}
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	t.logf("Saved secret %s/%s", t.GetNamespace(), name)
 	return nil
 }
 

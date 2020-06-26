@@ -24,7 +24,7 @@ func TestGenerateCerts(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	if !cackp.IsValid() {
+	if !cackp.IsValid(10 * time.Minute) {
 		t.Error("generated cert isn't valid")
 	}
 	cacert, err := cackp.GetParsedCertificate()
@@ -41,5 +41,8 @@ func TestGenerateCerts(t *testing.T) {
 	cert := ckp.GetTLSCertificateChain()
 	if len(cert.Certificate) != 2 {
 		t.Errorf("expecting 2 certs in chain, not %d", len(cert.Certificate))
+	}
+	if b := ckp.GetCACertPem(); b == nil {
+		t.Error("could not get CA cert pem")
 	}
 }
