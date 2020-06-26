@@ -15,9 +15,6 @@
 package ktls
 
 import (
-	"io/ioutil"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,16 +22,10 @@ import (
 )
 
 func TestTLS(t *testing.T) {
-	dir, err := ioutil.TempDir("", "go-ktls-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
 	k := fake.NewSimpleClientset()
 	kt := &TLSSecret{
 		ExplicitKubeClient: k,
 		Name:               "tls",
-		MountPoint:         dir,
 	}
 	tlsConfig, err := kt.GetTLSConfig()
 	if err != nil {
@@ -43,7 +34,11 @@ func TestTLS(t *testing.T) {
 	if tlsConfig == nil {
 		t.Error()
 	}
-	if n := len(tlsConfig.Certificates[0].Certificate); n != 2 {
+	cert, err := tlsConfig.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(cert.Certificate); n != 2 {
 		t.Error(n)
 	}
 	if s, err := kt.getSecret("tls"); s == nil || err != nil {
@@ -56,44 +51,7 @@ func TestTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ckp.IsValid() {
+	if !ckp.IsValid(10 * time.Minute) {
 		t.Error("invalid certificate generated")
-	}
-}
-
-func createCert(t *testing.T) *CertificateKeyPair {
-	caCert, err := GenerateCert("Test Inc", nil, nil, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, err := GenerateCert("Test Inc", nil, caCert, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cert
-}
-
-func TestFS(t *testing.T) {
-	cert := createCert(t)
-	dir, err := ioutil.TempDir("", "go-ktls-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	if err := ioutil.WriteFile(filepath.Join(dir, "tls.key"), cert.KeyPem, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := ioutil.WriteFile(filepath.Join(dir, "tls.crt"), cert.CertPem, 0600); err != nil {
-		t.Fatal(err)
-	}
-	kt := &TLSSecret{
-		MountPoint: dir,
-	}
-	ckp, err := kt.GetCertificateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ckp.IsValid() {
-		t.Error("invalid certificate")
 	}
 }

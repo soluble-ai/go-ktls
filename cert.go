@@ -52,12 +52,33 @@ func (ckp *CertificateKeyPair) GetParsedCertificate() (*x509.Certificate, error)
 	return ckp.parsedCertifcate, nil
 }
 
-func (ckp *CertificateKeyPair) GetTLSCertificateChain() tls.Certificate {
+func (ckp *CertificateKeyPair) GetCACertPem() []byte {
+	d := ckp.CertPem
+	var block *pem.Block
+	for {
+		var nextBlock *pem.Block
+		nextBlock, d = pem.Decode(d)
+		if nextBlock == nil {
+			break
+		}
+		block = nextBlock
+	}
+	if block == nil {
+		return nil
+	}
+	b := &bytes.Buffer{}
+	if err := pem.Encode(b, block); err != nil {
+		return nil
+	}
+	return b.Bytes()
+}
+
+func (ckp *CertificateKeyPair) GetTLSCertificateChain() *tls.Certificate {
 	tlscert, err := tls.X509KeyPair(ckp.CertPem, ckp.KeyPem)
 	if err != nil {
 		panic(err)
 	}
-	return tlscert
+	return &tlscert
 }
 
 func (ckp *CertificateKeyPair) getRSAPrivateKey() *rsa.PrivateKey {
@@ -69,7 +90,7 @@ func (ckp *CertificateKeyPair) getRSAPrivateKey() *rsa.PrivateKey {
 	return key.(*rsa.PrivateKey)
 }
 
-func (ckp *CertificateKeyPair) IsValid() bool {
+func (ckp *CertificateKeyPair) IsValid(d time.Duration) bool {
 	if ckp == nil {
 		return false
 	}
@@ -81,7 +102,7 @@ func (ckp *CertificateKeyPair) IsValid() bool {
 		return false
 	}
 	now := time.Now()
-	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+	if now.Before(cert.NotBefore) || now.Add(d).After(cert.NotAfter) {
 		return false
 	}
 	return true
