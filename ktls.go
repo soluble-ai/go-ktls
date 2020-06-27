@@ -60,8 +60,6 @@ type TLSSecret struct {
 	kubeClientError error
 }
 
-const renewalDenomintor = 5
-
 func (t *TLSSecret) logf(format string, values ...interface{}) {
 	if t.Log != nil {
 		t.Log(format, values...)
@@ -145,7 +143,7 @@ func (t *TLSSecret) getSecret(name string) (*corev1.Secret, error) {
 }
 
 func (t *TLSSecret) GetCertificateKeyPair() (*CertificateKeyPair, error) {
-	ckp, err := t.getSecretCertificate(t.Name, t.getCertDuration()/renewalDenomintor)
+	ckp, _, err := t.getSecretCertificate(t.Name, 10*time.Minute)
 	if err != nil {
 		return nil, err
 	}
@@ -165,23 +163,22 @@ func (t *TLSSecret) GetCertificateKeyPair() (*CertificateKeyPair, error) {
 	return ckp, nil
 }
 
-func (t *TLSSecret) getSecretCertificate(name string, d time.Duration) (*CertificateKeyPair, error) {
+func (t *TLSSecret) getSecretCertificate(name string, d time.Duration) (*CertificateKeyPair, *corev1.Secret, error) {
 	secret, err := t.getSecret(name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if secret != nil && secret.Data != nil {
 		ckp := &CertificateKeyPair{
 			KeyPem:  getSecretData(secret, corev1.TLSPrivateKeyKey),
 			CertPem: getSecretData(secret, corev1.TLSCertKey),
-			Source:  secret,
 		}
 		if ckp.IsValid(d) {
-			t.logf("Using TLS secret from %s/%s", t.GetNamespace(), t.Name)
-			return ckp, nil
+			t.logf("Using TLS secret from %s/%s valid for at least %s", t.GetNamespace(), name, d)
+			return ckp, secret, nil
 		}
 	}
-	return nil, nil
+	return nil, secret, nil
 }
 
 func (t *TLSSecret) getCertDuration() time.Duration {
@@ -208,11 +205,17 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	}
 	var caCert *CertificateKeyPair
 	var cert *CertificateKeyPair
-	caCert, err = t.getSecretCertificate(caName, t.getCACertDuration()/renewalDenomintor)
+	caCert, _, err = t.getSecretCertificate(caName, time.Hour)
 	caDuration := t.getCACertDuration()
+	if caDuration < 8*time.Hour {
+		return nil, fmt.Errorf("CA duration must be at least 8 hours")
+	}
 	certDuration := t.getCertDuration()
+	if certDuration < 30*time.Minute {
+		return nil, fmt.Errorf("cert duration must be at least 30 minutes")
+	}
 	if err == nil {
-		if caCert == nil || caCert.IsValid(caDuration/renewalDenomintor) {
+		if caCert == nil || !caCert.IsValid(time.Hour) {
 			t.logf("Generating new CA certificate %s/%s", t.GetNamespace(), caName)
 			caCert, err = GenerateCert(caName, nil, nil, caDuration)
 			if err == nil {
@@ -235,18 +238,14 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 
 func (t *TLSSecret) persistCert(ckp *CertificateKeyPair, name string) error {
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		c, err := t.getSecretCertificate(name, time.Minute)
+		c, secret, err := t.getSecretCertificate(name, time.Minute)
 		if err != nil {
 			return err
 		}
-		if c.IsValid(time.Minute) {
+		if c != nil {
 			t.logf("Updated certificate is now valid")
 			ckp.CopyFrom(c)
 			return nil
-		}
-		var secret *corev1.Secret
-		if c != nil {
-			secret = c.Source.(*corev1.Secret)
 		}
 		secretData := map[string][]byte{
 			corev1.TLSCertKey:       ckp.CertPem,

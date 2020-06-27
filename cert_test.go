@@ -46,3 +46,13 @@ func TestGenerateCerts(t *testing.T) {
 		t.Error("could not get CA cert pem")
 	}
 }
+
+func TestRenewal(t *testing.T) {
+	cackp, err := GenerateCert("Test Inc", nil, nil, time.Minute)
+	if err != nil {
+		t.Error(err)
+	}
+	if cackp.IsValid(2 * time.Minute) {
+		t.Error("certificate should require renewal")
+	}
+}
