@@ -30,7 +30,6 @@ import (
 type CertificateKeyPair struct {
 	CertPem          []byte
 	KeyPem           []byte
-	Source           interface{}
 	parsedCertifcate *x509.Certificate
 }
 
