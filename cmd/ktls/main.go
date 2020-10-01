@@ -15,47 +15,130 @@
 package main
 
 import (
-	"flag"
-	"io/ioutil"
+	"context"
+	"fmt"
 	"log"
-	"path/filepath"
+	"os"
 	"strings"
 
 	"github.com/soluble-ai/go-ktls"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
-var secret = &ktls.TLSSecret{}
-var quiet bool
-var dnsNames string
-var outputDir string
+var (
+	secret = &ktls.TLSSecret{
+		FieldManager: "ktls",
+	}
+	quiet bool
+)
+
+func envDefault(n, d string) string {
+	v := os.Getenv(n)
+	if v != "" {
+		return v
+	}
+	return v
+}
+
+func addFlags(flags *pflag.FlagSet) {
+	flags.StringVar(&secret.CAName, "ca-name", "", "The name of the CA secret, defaults to <name>-ca")
+	flags.StringVar(&secret.Name, "name", envDefault("KTLS_NAME", ""), "The name of the secret, required")
+	flags.StringVar(&secret.Namespace, "namespace", envDefault("KTLS_NAMESPACE", ""), "The namespace to create the secret in, required")
+	flags.StringVar(&secret.ClusterDomainName, "cluster-domain-name", envDefault("KTSL_CLUSTER_DOMAIN_NAME", "cluster.local"),
+		"The cluster domain name")
+}
+
+func complete() error {
+	if secret.Namespace == "" {
+		return fmt.Errorf("the --namespace flag is required")
+	}
+	if secret.Name == "" {
+		return fmt.Errorf("the --name flag is required")
+	}
+	return nil
+}
+
+func deleteCommand() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete TLS secrets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := complete(); err != nil {
+				return err
+			}
+			return secret.Delete()
+		},
+	}
+	addFlags(c.Flags())
+	return c
+}
+
+func createCommand() *cobra.Command {
+	var (
+		dnsNames        string
+		createNamespace bool
+	)
+	c := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new TLS secret",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := complete(); err != nil {
+				return err
+			}
+			if dnsNames != "" {
+				secret.DNSNames = strings.Split(dnsNames, ",")
+			}
+			if createNamespace {
+				kubeClient, err := ktls.GetDefaultKubeClient()
+				if err != nil {
+					return err
+				}
+				_, err = kubeClient.CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: secret.Namespace,
+					},
+				}, metav1.CreateOptions{
+					FieldManager: secret.FieldManager,
+				})
+				if err != nil && !errors.IsAlreadyExists(err) {
+					return err
+				}
+				if err == nil {
+					log.Printf("Created namespace %s", secret.Namespace)
+				}
+			}
+			return secret.Create()
+		},
+	}
+	flags := c.Flags()
+	flags.StringVar(&dnsNames, "dns-names", "", "Comma separated list of DNS names for the cert")
+	flags.BoolVar(&createNamespace, "create-namespace",
+		envDefault("KTLS_CREATE_NAMESPACE", "") == "true", "Create the namespace if it doesn't already exist")
+	addFlags(flags)
+	return c
+}
 
 func main() {
-	flag.StringVar(&secret.CAName, "ca-name", "", "The name of the CA secret")
-	flag.StringVar(&secret.Name, "name", "tls", "The name of the secret")
-	flag.StringVar(&secret.Namespace, "namespace", "default", "The namespace to create the secret in")
-	flag.StringVar(&dnsNames, "dns-names", "", "Comma separated list of DNS names for the cert")
-	flag.BoolVar(&quiet, "q", false, "Don't print anything")
-	flag.StringVar(&outputDir, "output-dir", "", "Write the certificate to this directory")
-	flag.Parse()
-	if dnsNames != "" {
-		secret.DNSNames = strings.Split(dnsNames, ",")
+	root := cobra.Command{
+		Use: "ktls",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			if quiet {
+				secret.Log = func(format string, values ...interface{}) {}
+			}
+		},
+		SilenceUsage: true,
 	}
-	if quiet {
-		secret.Log = func(format string, values ...interface{}) {}
-	}
-	cert, err := secret.GetCertificateKeyPair()
+	flags := root.PersistentFlags()
+	flags.BoolVar(&quiet, "q", false, "Don't print anything")
+	root.AddCommand(deleteCommand())
+	root.AddCommand(createCommand())
+	err := root.Execute()
 	if err != nil {
-		panic(err)
-	}
-	if outputDir != "" {
-		err := ioutil.WriteFile(filepath.Join(outputDir, "tls.crt"), cert.CertPem, 0600)
-		if err == nil {
-			err = ioutil.WriteFile(filepath.Join(outputDir, "tls.key"), cert.KeyPem, 0600)
-		}
-		if err != nil {
-			log.Fatalf("Could not save certificate to %s: %s", outputDir, err.Error())
-		}
-		log.Printf("Saved certificate to %s", outputDir)
+		log.Fatal(err)
 	}
 }
