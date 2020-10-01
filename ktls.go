@@ -30,34 +30,46 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
-// TLSSecret makes a best-effort attempt to get you a TLS certificate,
-// resorting to generating a certificate on-the-fly and saving it in
-// a secret if necessary.
+// TLSSecret retrieves a TLS certificate from a kubernetes secret.  If the
+// secret doesn't exist, it will generate it.
 type TLSSecret struct {
 	// Explicitly provide a KubeClient to lookup a TLS secret and possibly generate
-	// a certificate on-the-fly.  Even if you don't provide one TLSSecret will try
-	// and get a "default" one for you.
-	ExplicitKubeClient       kubernetes.Interface
-	DisableDefaultKubeClient bool
+	// a certificate on-the-fly.  If unset TLSSecret will try and get one
+	// for you.
+	ExplicitKubeClient kubernetes.Interface
 	// The namespace for the certificate
 	Namespace string
 	// The name of the secret
 	Name string
 	// The name of the CA secret, defaults to Name-ca
 	CAName string
-	// The duration of the CA certifcate, defaults to 1 year
+	// The name of the secret that will hold the public
+	// CA certificate.  This duplicates the CAName secret but
+	// is missing the "tls.key" entry.
+	CAPublicName string
+	// The duration of the CA certifcate, defaults to 10 years
 	CADuration time.Duration
 	// The duration of the TLS certificate, defaults to 8 hours
 	Duration time.Duration
+	// The DNSNames of the certificate.  If unset, then DNSNames will be Name,
+	// Name.Namespace.svc, and Name.Namespace.svc.cluster.local (these values)
+	// are appropriate for a service with the name "Name".
 	DNSNames []string
+	// Enable background refresh
+	EnableBackgroundRefresh bool
+	// The field manager for update and create operations
+	FieldManager string
+	// The cluster domain name.  If unset, then "cluster.local"
+	ClusterDomainName string
+
 	// Custom log output
 	Log func(string, ...interface{})
 
-	lock            sync.Mutex
-	tlsCertificate  *tls.Certificate
-	renewalTime     time.Time
-	kubeClient      kubernetes.Interface
-	kubeClientError error
+	lock                     sync.Mutex
+	tlsCertificate           *tls.Certificate
+	renewalTime              time.Time
+	kubeClient               kubernetes.Interface
+	backgroundRenewalRunning bool
 }
 
 func (t *TLSSecret) logf(format string, values ...interface{}) {
@@ -68,24 +80,27 @@ func (t *TLSSecret) logf(format string, values ...interface{}) {
 	}
 }
 
-func (t *TLSSecret) GetNamespace() string {
-	if t.Namespace != "" {
-		return t.Namespace
-	}
-	return "default"
-}
-
 func (t *TLSSecret) GetTLSConfig() (*tls.Config, error) {
+	// get the certificate now to detect errors and to
+	// start the background refresh process
+	_, err := t.getTLSCertificate(nil)
+	if err != nil {
+		return nil, err
+	}
 	return &tls.Config{
 		GetCertificate: t.getTLSCertificate,
+		MinVersion:     tls.VersionTLS12,
 	}, nil
 }
 
 func (t *TLSSecret) getTLSCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
-	if t.tlsCertificate == nil || time.Now().After(t.renewalTime) {
-		ckp, err := t.GetCertificateKeyPair()
+	if err := t.validateNames(); err != nil {
+		return nil, err
+	}
+	if t.tlsCertificate == nil || clock.Now().After(t.renewalTime) {
+		ckp, err := t.doGetCertificateKeyPair()
 		if err != nil {
 			t.logf("Could not get certificate: %s", err.Error())
 			return nil, nil
@@ -94,10 +109,14 @@ func (t *TLSSecret) getTLSCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 		x509cert, err := ckp.GetParsedCertificate()
 		if err != nil {
 			t.logf("Could not parse generated certificate: %s", err.Error())
-			t.renewalTime = time.Now().Add(time.Minute)
+			t.renewalTime = clock.Now().Add(time.Minute)
 		} else {
 			t.renewalTime = x509cert.NotAfter.Add(-15 * time.Minute)
 		}
+	}
+	if t.EnableBackgroundRefresh && !t.backgroundRenewalRunning {
+		t.backgroundRenewalRunning = true
+		go t.backgroundRenewal()
 	}
 	return t.tlsCertificate, nil
 }
@@ -110,29 +129,35 @@ func (t *TLSSecret) MustGetTLSConfig() *tls.Config {
 	return config
 }
 
-func (t *TLSSecret) GetKubeClient() kubernetes.Interface {
+func (t *TLSSecret) getKubeClient() (kubernetes.Interface, error) {
 	if t.ExplicitKubeClient != nil {
-		return t.ExplicitKubeClient
+		return t.ExplicitKubeClient, nil
 	}
-	if !t.DisableDefaultKubeClient && t.kubeClient == nil && t.kubeClientError == nil {
-		rules := clientcmd.NewDefaultClientConfigLoadingRules()
-		config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
-		if err == nil {
-			t.kubeClient, err = kubernetes.NewForConfig(config)
-		}
+	if t.kubeClient == nil {
+		kubeClient, err := GetDefaultKubeClient()
 		if err != nil {
-			t.logf("Failed to get a kubernetes client: %s", err.Error())
-			t.kubeClientError = err
+			return nil, err
 		}
+		t.kubeClient = kubeClient
 	}
-	return t.kubeClient
+	return t.kubeClient, nil
+}
+
+func GetDefaultKubeClient() (kubernetes.Interface, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	return kubernetes.NewForConfig(config)
 }
 
 func (t *TLSSecret) getSecret(name string) (*corev1.Secret, error) {
-	if t.GetKubeClient() == nil || name == "" {
-		return nil, nil
+	kubeClient, err := t.getKubeClient()
+	if err != nil {
+		return nil, err
 	}
-	secret, err := t.GetKubeClient().CoreV1().Secrets(t.GetNamespace()).Get(context.TODO(), name, metav1.GetOptions{})
+	secret, err := kubeClient.CoreV1().Secrets(t.Namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -143,6 +168,25 @@ func (t *TLSSecret) getSecret(name string) (*corev1.Secret, error) {
 }
 
 func (t *TLSSecret) GetCertificateKeyPair() (*CertificateKeyPair, error) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if err := t.validateNames(); err != nil {
+		return nil, err
+	}
+	return t.doGetCertificateKeyPair()
+}
+
+func (t *TLSSecret) validateNames() error {
+	if t.Name == "" {
+		return fmt.Errorf("TLSSecret Name cannot be empty")
+	}
+	if t.Namespace == "" {
+		return fmt.Errorf("TLSSecret Namespace cannot be empty")
+	}
+	return nil
+}
+
+func (t *TLSSecret) doGetCertificateKeyPair() (*CertificateKeyPair, error) {
 	ckp, _, err := t.getSecretCertificate(t.Name, 10*time.Minute)
 	if err != nil {
 		return nil, err
@@ -151,10 +195,6 @@ func (t *TLSSecret) GetCertificateKeyPair() (*CertificateKeyPair, error) {
 		if t.Name == "" {
 			return nil, fmt.Errorf("the TLSSecret Name must be set")
 		}
-		if t.GetKubeClient() == nil {
-			return nil, fmt.Errorf("cannot create secret if kubernetes client is not available")
-		}
-		var err error
 		ckp, err = t.generateCert()
 		if err != nil {
 			return nil, err
@@ -174,7 +214,8 @@ func (t *TLSSecret) getSecretCertificate(name string, d time.Duration) (*Certifi
 			CertPem: getSecretData(secret, corev1.TLSCertKey),
 		}
 		if ckp.IsValid(d) {
-			t.logf("Using TLS secret from %s/%s valid for at least %s", t.GetNamespace(), name, d)
+			x509Cert, _ := ckp.GetParsedCertificate()
+			t.logf("TLS secret from %s/%s valid until %s", t.Namespace, name, x509Cert.NotAfter)
 			return ckp, secret, nil
 		}
 	}
@@ -192,17 +233,14 @@ func (t *TLSSecret) getCertDuration() time.Duration {
 func (t *TLSSecret) getCACertDuration() time.Duration {
 	caDuration := t.CADuration
 	if caDuration == 0 {
-		caDuration = 365 * 24 * time.Hour
+		caDuration = 10 * 365 * 24 * time.Hour
 	}
 	return caDuration
 }
 
 func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	var err error
-	caName := t.CAName
-	if caName == "" {
-		caName = t.Name + "-ca"
-	}
+	caName := defaultString(t.CAName, t.Name+"-ca")
 	var caCert *CertificateKeyPair
 	var cert *CertificateKeyPair
 	caCert, _, err = t.getSecretCertificate(caName, time.Hour)
@@ -216,17 +254,29 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	}
 	if err == nil {
 		if caCert == nil || !caCert.IsValid(time.Hour) {
-			t.logf("Generating new CA certificate %s/%s", t.GetNamespace(), caName)
+			t.logf("Generating new CA certificate %s/%s", t.Namespace, caName)
 			caCert, err = GenerateCert(caName, nil, nil, caDuration)
 			if err == nil {
-				err = t.persistCert(caCert, caName)
+				err = t.persistCert(caCert, caName, true)
+				if err == nil {
+					err = t.persistCert(caCert, defaultString(t.CAPublicName, caName+"-public"), false)
+				}
 			}
 		}
 		if err == nil {
-			t.logf("Generating new TLS certificate %s/%s", t.GetNamespace(), t.Name)
-			cert, err = GenerateCert(t.Name, t.DNSNames, caCert, certDuration)
+			t.logf("Generating new TLS certificate %s/%s", t.Namespace, t.Name)
+			dnsNames := t.DNSNames
+			if len(dnsNames) == 0 {
+				dnsNames = []string{
+					t.Name,
+					fmt.Sprintf("%s.%s", t.Name, t.Namespace),
+					fmt.Sprintf("%s.%s.svc", t.Name, t.Namespace),
+					fmt.Sprintf("%s.%s.svc.%s", t.Name, t.Namespace, defaultString(t.ClusterDomainName, "cluster.local")),
+				}
+			}
+			cert, err = GenerateCert(t.Name, dnsNames, caCert, certDuration)
 			if err == nil {
-				err = t.persistCert(cert, t.Name)
+				err = t.persistCert(cert, t.Name, true)
 			}
 		}
 	}
@@ -236,44 +286,127 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 	return cert, nil
 }
 
-func (t *TLSSecret) persistCert(ckp *CertificateKeyPair, name string) error {
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+func (t *TLSSecret) persistCert(ckp *CertificateKeyPair, name string, includeKey bool) error {
+	kubeClient, err := t.getKubeClient()
+	if err != nil {
+		return err
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		c, secret, err := t.getSecretCertificate(name, time.Minute)
 		if err != nil {
 			return err
 		}
 		if c != nil {
-			t.logf("Updated certificate is now valid")
-			ckp.CopyFrom(c)
-			return nil
+			// it's possible another process has updated the cert, in which
+			// case we'll use the updated version
+			x509Cert, err := c.GetParsedCertificate()
+			if err == nil && x509Cert.NotBefore.After(t.renewalTime.Add(-1*time.Minute)) {
+				t.logf("Updated certificate is now valid")
+				ckp.CopyFrom(c)
+				return nil
+			}
 		}
 		secretData := map[string][]byte{
-			corev1.TLSCertKey:       ckp.CertPem,
-			corev1.TLSPrivateKeyKey: ckp.KeyPem,
+			corev1.TLSCertKey: ckp.CertPem,
+		}
+		var secretType corev1.SecretType
+		if includeKey {
+			secretData[corev1.TLSPrivateKeyKey] = ckp.KeyPem
+			secretType = corev1.SecretTypeTLS
+		} else {
+			// can't use tls secret because we're not persisting a key
+			secretType = corev1.SecretTypeOpaque
 		}
 		if secret == nil {
 			secret = &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: name,
 				},
-				Type: corev1.SecretTypeTLS,
+				Type: secretType,
 				Data: secretData,
 			}
-			_, err := t.GetKubeClient().CoreV1().Secrets(t.GetNamespace()).Create(context.TODO(), secret, metav1.CreateOptions{})
+			_, err = kubeClient.CoreV1().Secrets(t.Namespace).Create(context.TODO(), secret,
+				metav1.CreateOptions{
+					FieldManager: t.FieldManager,
+				})
+			if err == nil {
+				t.logf("Persisted new %s secret %s/%s", secretType, t.Namespace, name)
+			}
 			return err
 		}
-		secret.Type = corev1.SecretTypeTLS
+		secret.Type = secretType
 		secret.Data = secretData
-		_, err = t.GetKubeClient().CoreV1().Secrets(t.GetNamespace()).Update(context.TODO(), secret, metav1.UpdateOptions{})
+		_, err = kubeClient.CoreV1().Secrets(t.Namespace).Update(context.TODO(), secret,
+			metav1.UpdateOptions{
+				FieldManager: t.FieldManager,
+			})
 		if err == nil {
-			t.logf("Saved secret %s/%s", t.GetNamespace(), name)
+			t.logf("Updated %s secret %s/%s", secretType, t.Namespace, name)
 		}
 		return err
 	})
+}
+
+func (t *TLSSecret) backgroundRenewal() {
+	var sleepTime time.Duration
+	t.logf("Starting background refresh for TLS secret %s/%s", t.Namespace, t.Name)
+	for {
+		if sleepTime >= 0 {
+			clock.Sleep(sleepTime)
+		}
+		func() {
+			t.lock.Lock()
+			defer t.lock.Unlock()
+			if sleepTime > 0 {
+				_, err := t.getTLSCertificate(nil)
+				if err != nil {
+					t.logf("failed to renew TLS certificate %s/%s: %s", t.Namespace, t.Name, err.Error())
+					sleepTime = time.Minute
+					return
+				}
+			}
+			sleepTime = time.Until(t.renewalTime) - time.Minute
+		}()
+	}
+}
+
+func (t *TLSSecret) Create() error {
+	if err := t.validateNames(); err != nil {
+		return err
+	}
+	_, err := t.GetCertificateKeyPair()
+	return err
+}
+
+func (t *TLSSecret) Delete() error {
+	if err := t.validateNames(); err != nil {
+		return err
+	}
+	err := t.deleteSecret(t.Name)
+	caName := defaultString(t.CAName, t.Name+"-ca")
+	if err == nil {
+		err = t.deleteSecret(caName)
+	}
+	if err == nil {
+		err = t.deleteSecret(defaultString(t.CAPublicName, caName+"-public"))
+	}
+	return err
+}
+
+func (t *TLSSecret) deleteSecret(name string) error {
+	kubeClient, err := t.getKubeClient()
 	if err != nil {
 		return err
 	}
-	return nil
+	secrets := kubeClient.CoreV1().Secrets(t.Namespace)
+	err = secrets.Delete(context.TODO(), name, metav1.DeleteOptions{})
+	if err == nil {
+		t.logf("Deleted secret %s/%s", t.Namespace, name)
+	}
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func getSecretData(secret *corev1.Secret, name string) []byte {
@@ -281,4 +414,11 @@ func getSecretData(secret *corev1.Secret, name string) []byte {
 		return nil
 	}
 	return secret.Data[name]
+}
+
+func defaultString(s, d string) string {
+	if s != "" {
+		return s
+	}
+	return d
 }

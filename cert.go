@@ -25,7 +25,11 @@ import (
 	"fmt"
 	"math/big"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
+
+var clock = clockwork.NewRealClock()
 
 type CertificateKeyPair struct {
 	CertPem          []byte
@@ -100,7 +104,7 @@ func (ckp *CertificateKeyPair) IsValid(d time.Duration) bool {
 	if err != nil {
 		return false
 	}
-	now := time.Now()
+	now := clock.Now()
 	if now.Before(cert.NotBefore) || now.Add(d).After(cert.NotAfter) {
 		return false
 	}
@@ -112,7 +116,7 @@ func GenerateCert(name string, dnsNames []string, parent *CertificateKeyPair, du
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
-	notBefore := time.Now()
+	notBefore := clock.Now()
 	notAfter := notBefore.Add(duration)
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
