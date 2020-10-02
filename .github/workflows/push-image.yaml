@@ -1,4 +1,3 @@
-#!/bin/bash
 # Copyright 2020 Soluble Inc
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,23 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+name: Push Release
 
-set -e
+on:
+  release:
+    types: [ published ]
 
-echo "Running go test"
-go test -cover ./...
-
-linter=golangci-lint
-if [ -x ./bin/golangci-lint ]; then
-    linter=./bin/golangci-lint
-fi
-
-if "${linter}" --help > /dev/null 2>&1; then
-    echo "Running ${linter}"
-    "${linter}" run -E stylecheck -E gosec -E goimports -E misspell -E gocritic \
-      -E whitespace -E goprintffuncname
-else
-    echo "golangci-lint not available, skipping lint"
-fi
-
-go build -o ktls cmd/ktls/main.go
+jobs:
+  build:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 0
+    - uses: GoogleCloudPlatform/github-actions/setup-gcloud@master
+      with:
+        version: '290.0.1'
+        project_id: soluble-repo
+        service_account_key: ${{ secrets.GCP_PUSH_SA_KEY }}
+        export_default_credentials: true
+    - run: gcloud auth configure-docker
+    - run: ./hack/push-image.sh

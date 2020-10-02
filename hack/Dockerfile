@@ -1,4 +1,3 @@
-#!/bin/bash
 # Copyright 2020 Soluble Inc
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,23 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+FROM golang:1.14-buster as build
 
-set -e
+RUN wget -O - -q https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh| sh -s v1.31.0
 
-echo "Running go test"
-go test -cover ./...
+WORKDIR /go/src/app
 
-linter=golangci-lint
-if [ -x ./bin/golangci-lint ]; then
-    linter=./bin/golangci-lint
-fi
+# run this in a separate step to cache modules between builds
+COPY go.mod go.sum ./
+RUN go mod download
 
-if "${linter}" --help > /dev/null 2>&1; then
-    echo "Running ${linter}"
-    "${linter}" run -E stylecheck -E gosec -E goimports -E misspell -E gocritic \
-      -E whitespace -E goprintffuncname
-else
-    echo "golangci-lint not available, skipping lint"
-fi
+ADD . /go/src/app
 
-go build -o ktls cmd/ktls/main.go
+RUN go build -o /go/bin/ktls cmd/ktls/main.go
+
+# copy the executable to distroless
+FROM gcr.io/distroless/base-debian10
+COPY --from=build /go/bin/ktls /
+ENTRYPOINT [ "/ktls" ]
