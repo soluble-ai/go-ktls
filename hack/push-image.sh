@@ -14,22 +14,10 @@
 # limitations under the License.
 
 
-set -e
+set -euo pipefail
 
-echo "Running go test"
-go test -cover ./...
+tag=$(git describe --tags)
+image=gcr.io/soluble-repo/ktls:$tag
 
-linter=golangci-lint
-if [ -x ./bin/golangci-lint ]; then
-    linter=./bin/golangci-lint
-fi
-
-if "${linter}" --help > /dev/null 2>&1; then
-    echo "Running ${linter}"
-    "${linter}" run -E stylecheck -E gosec -E goimports -E misspell -E gocritic \
-      -E whitespace -E goprintffuncname
-else
-    echo "golangci-lint not available, skipping lint"
-fi
-
-go build -o ktls cmd/ktls/main.go
+docker build -t $image -f ./hack/Dockerfile .
+docker push $image
