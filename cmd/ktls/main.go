@@ -20,6 +20,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/soluble-ai/go-ktls"
 	"github.com/spf13/cobra"
@@ -82,6 +83,7 @@ func createCommand() *cobra.Command {
 	var (
 		dnsNames        string
 		createNamespace bool
+		days            int
 	)
 	c := &cobra.Command{
 		Use:   "create",
@@ -93,6 +95,7 @@ func createCommand() *cobra.Command {
 			if dnsNames != "" {
 				secret.DNSNames = strings.Split(dnsNames, ",")
 			}
+			secret.Duration = time.Duration(days*24) * time.Hour
 			if createNamespace {
 				kubeClient, err := ktls.GetDefaultKubeClient()
 				if err != nil {
@@ -119,6 +122,7 @@ func createCommand() *cobra.Command {
 	flags.StringVar(&dnsNames, "dns-names", "", "Comma separated list of DNS names for the cert")
 	flags.BoolVar(&createNamespace, "create-namespace",
 		envDefault("KTLS_CREATE_NAMESPACE", "") == "true", "Create the namespace if it doesn't already exist")
+	flags.IntVar(&days, "days", 365, "Make the cert valid for this number of days")
 	addFlags(flags)
 	return c
 }
