@@ -136,6 +136,7 @@ func patchCABundleCommand() *cobra.Command {
 	var (
 		resource     string
 		resourceName string
+		path         string
 	)
 	c := &cobra.Command{
 		Use:   "patch-ca-bundle",
@@ -160,16 +161,17 @@ func patchCABundleCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var path string
-			switch resource {
-			case "mutatingwebhookconfigurations":
-				fallthrough
-			case "validatingwebhookconfigurations":
-				path = "/webhooks/0/clientConfig/caBundle"
-			case "apiservices":
-				path = "/spec/caBundle"
-			default:
-				return fmt.Errorf("unknown resource %s", resource)
+			if path == "" {
+				switch gvr.Resource {
+				case "mutatingwebhookconfigurations":
+					fallthrough
+				case "validatingwebhookconfigurations":
+					path = "/webhooks/0/clientConfig/caBundle"
+				case "apiservices":
+					path = "/spec/caBundle"
+				default:
+					return fmt.Errorf("no defaulth path for resource %s, use --path", resource)
+				}
 			}
 			ckp, err := secret.GetCertificateKeyPair()
 			if err != nil {
@@ -190,6 +192,7 @@ func patchCABundleCommand() *cobra.Command {
 	flags := c.Flags()
 	flags.StringVar(&resource, "resource", "", "The resource to patch")
 	flags.StringVar(&resourceName, "resource-name", "", "The name of the resource to patch")
+	flags.StringVar(&path, "patch-path", "", "The JSON patch path to patch")
 	addFlags(flags)
 	return c
 }

@@ -14,8 +14,6 @@
 
 FROM golang:1.14-buster as build
 
-RUN wget -O - -q https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh| sh -s v1.31.0
-
 WORKDIR /go/src/app
 
 # run this in a separate step to cache modules between builds
