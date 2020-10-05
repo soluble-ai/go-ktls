@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
 )
@@ -43,7 +44,7 @@ type TLSSecret struct {
 	Name string
 	// The name of the CA secret, defaults to Name-ca
 	CAName string
-	// The name of the secret that will hold the public
+	// If non-empty, persist an opaque secret with the public
 	// CA certificate.  This duplicates the CAName secret but
 	// is missing the "tls.key" entry.
 	CAPublicName string
@@ -143,9 +144,13 @@ func (t *TLSSecret) getKubeClient() (kubernetes.Interface, error) {
 	return t.kubeClient, nil
 }
 
-func GetDefaultKubeClient() (kubernetes.Interface, error) {
+func GetDefaultRESTConfig() (*rest.Config, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+}
+
+func GetDefaultKubeClient() (kubernetes.Interface, error) {
+	config, err := GetDefaultRESTConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +264,9 @@ func (t *TLSSecret) generateCert() (*CertificateKeyPair, error) {
 			if err == nil {
 				err = t.persistCert(caCert, caName, true)
 				if err == nil {
-					err = t.persistCert(caCert, defaultString(t.CAPublicName, caName+"-public"), false)
+					if t.CAPublicName != "" {
+						err = t.persistCert(caCert, t.CAPublicName, false)
+					}
 				}
 			}
 		}

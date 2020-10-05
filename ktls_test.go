@@ -66,6 +66,7 @@ func TestCreateDelete(t *testing.T) {
 		ExplicitKubeClient: k,
 		Name:               "tls",
 		Namespace:          "default",
+		CAPublicName:       "tls-ca-public",
 	}
 	if err := kt.Create(); err != nil {
 		t.Fatal(err)
