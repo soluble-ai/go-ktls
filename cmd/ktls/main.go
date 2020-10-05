@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -28,6 +29,10 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
@@ -127,6 +132,95 @@ func createCommand() *cobra.Command {
 	return c
 }
 
+func patchCABundleCommand() *cobra.Command {
+	var (
+		resource     string
+		resourceName string
+	)
+	c := &cobra.Command{
+		Use:   "patch-ca-bundle",
+		Short: "Update the caBundle property on a webhook or api service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := complete(); err != nil {
+				return err
+			}
+			restConfig, err := ktls.GetDefaultRESTConfig()
+			if err != nil {
+				return err
+			}
+			discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+			if err != nil {
+				return err
+			}
+			gvr, err := getPatchGroupVersionResource(discoveryClient, resource)
+			if err != nil {
+				return err
+			}
+			client, err := dynamic.NewForConfig(restConfig)
+			if err != nil {
+				return err
+			}
+			var path string
+			switch resource {
+			case "mutatingwebhookconfigurations":
+				fallthrough
+			case "validatingwebhookconfigurations":
+				path = "/webhooks/0/clientConfig/caBundle"
+			case "apiservices":
+				path = "/spec/caBundle"
+			default:
+				return fmt.Errorf("unknown resource %s", resource)
+			}
+			ckp, err := secret.GetCertificateKeyPair()
+			if err != nil {
+				return err
+			}
+			caBundle := base64.StdEncoding.EncodeToString(ckp.GetCACertPem())
+			patch := fmt.Sprintf(`[{"op":"add","path":"%s","value":"%s"}]`, path, caBundle)
+			_, err = client.Resource(gvr).Patch(context.TODO(), resourceName, types.JSONPatchType, []byte(patch),
+				metav1.PatchOptions{
+					FieldManager: "ktls",
+				})
+			if err == nil {
+				log.Printf("Patched CA bundle into %s %s", gvr, resourceName)
+			}
+			return err
+		},
+	}
+	flags := c.Flags()
+	flags.StringVar(&resource, "resource", "", "The resource to patch")
+	flags.StringVar(&resourceName, "resource-name", "", "The name of the resource to patch")
+	addFlags(flags)
+	return c
+}
+
+func getPatchGroupVersionResource(discoveryClient discovery.DiscoveryInterface, resource string) (gvr schema.GroupVersionResource, err error) {
+	apiResourceLists, err := discoveryClient.ServerPreferredResources()
+	if err != nil {
+		return
+	}
+	apiResourceLists = discovery.FilteredBy(discovery.ResourcePredicateFunc(func(groupVersion string, r *metav1.APIResource) bool {
+		if r.Name != resource {
+			return false
+		}
+		for _, v := range r.Verbs {
+			if v == "patch" {
+				return true
+			}
+		}
+		return false
+	}), apiResourceLists)
+	if len(apiResourceLists) == 0 || len(apiResourceLists[0].APIResources) == 0 {
+		err = fmt.Errorf("cannot find patchable resource %s", resource)
+		return
+	}
+	apiResources := apiResourceLists[0]
+	apiResource := apiResources.APIResources[0]
+	gv, _ := schema.ParseGroupVersion(apiResources.GroupVersion)
+	gvr = gv.WithResource(apiResource.Name)
+	return
+}
+
 func main() {
 	root := cobra.Command{
 		Use: "ktls",
@@ -141,6 +235,7 @@ func main() {
 	flags.BoolVar(&quiet, "q", false, "Don't print anything")
 	root.AddCommand(deleteCommand())
 	root.AddCommand(createCommand())
+	root.AddCommand(patchCABundleCommand())
 	err := root.Execute()
 	if err != nil {
 		log.Fatal(err)
